@@ -1,7 +1,0 @@
-<launch>
-    <node
-        pkg="twist_publisher"
-        exec="twist_listener_node"
-        name="twist_listener_node"
-        output="screen" />
-</launch>
