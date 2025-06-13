@@ -3,6 +3,8 @@
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <px4_msgs/msg/vehicle_angular_velocity.hpp>
+#include <px4_msgs/msg/vehicle_attitude.hpp>
 #include <px4_msgs/msg/vehicle_thrust_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_torque_setpoint.hpp>
 #include <px4_msgs/msg/sensor_combined.hpp>
@@ -61,12 +63,22 @@ public:
 		qos_pub.durability_volatile();  // 데이터  지속성 없음
 
       //   Subscribe
+      // vehicle_visual_odometry_subscriber_ = this->create_subscription<VehicleOdometry>(
+      //         px4_namespace + "in/vehicle_visual_odometry", qos_sub,
+      //         std::bind(&MotorControl::vehicle_visual_odometry_callback, this, std::placeholders::_1));
       vehicle_odometry_subscriber_ = this->create_subscription<VehicleOdometry>(
-              px4_namespace + "in/vehicle_visual_odometry", qos_sub,
-              std::bind(&MotorControl::odometry_callback, this, std::placeholders::_1));
-      imu_subscriber_ = this->create_subscription<SensorCombined>(
-              px4_namespace + "out/sensor_combined", qos_sub,
-              std::bind(&MotorControl::imu_callback, this, std::placeholders::_1));
+            px4_namespace + "out/vehicle_odometry", qos_sub,
+            std::bind(&MotorControl::vehicle_odometry_callback, this, std::placeholders::_1));
+      vehicle_angular_velocity_subscriber_ = this->create_subscription<VehicleAngularVelocity>(
+              px4_namespace + "out/vehicle_angular_velocity", qos_sub,
+              std::bind(&MotorControl::vehicle_angular_velocity_callback, this, std::placeholders::_1));
+      vehicle_attitude_subscriber_ = this->create_subscription<VehicleAttitude>(
+              px4_namespace + "out/vehicle_attitude", qos_sub,
+              std::bind(&MotorControl::vehicle_attitude_callback, this, std::placeholders::_1));
+      // optitrack_odometry_subscriber_ = this->create_subscription<nav_msgs::msg::Odome        
+      // imu_subscriber_ = this->create_subscription<SensorCombined>(
+      //         px4_namespace + "out/sensor_combined", qos_sub,
+      //         std::bind(&MotorControl::imu_callback, this, std::placeholders::_1));
       // optitrack_odometry_subscriber_ = this->create_subscription<nav_msgs::msg::Odometry>(
       //       "/optitrackKYJLJW", qos_sub,
       //       std::bind(&MotorControl::optitrack_odometry_callback, this, std::placeholders::_1));
@@ -78,9 +90,8 @@ public:
       offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>(px4_namespace+"in/offboard_control_mode", qos_pub);
       actuator_motors_publisher_ = this->create_publisher<ActuatorMotors>(px4_namespace+"in/actuator_motors", qos_pub);
       // thrust_publisher_ = this->create_publisher<VehicleThrustSetpoint>(px4_namespace+"in/vehicle_thrust_setpoint", 10);
-      // torque_publisher_ = this->create_publisher<VehicleTorqueSetpoint>(px4_namespace+"in/vehicle_torque_setpoint", 10);
-       
-      // Logging
+      // torque_publisher_ = this->create_publisher<VehicleTorqueSetpoint>(px4_namesrpy_des
+      // /record/pos", qos_pub);
       pos_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/record/pos", qos_pub);
       rpy_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/record/rpy", qos_pub);
       vel_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/record/vel", qos_pub);
@@ -89,6 +100,7 @@ public:
       vel_des_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/record/vel_des", qos_pub);
       omg_des_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/record/omg_des", qos_pub);
       rpy_des_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/record/rpy_des", qos_pub);
+      b3_nume_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/record/b3_nume", qos_pub);
 
       // Client
       vehicle_command_client_ = this->create_client<px4_msgs::srv::VehicleCommand>(px4_namespace+"vehicle_command");
@@ -130,6 +142,16 @@ public:
 		prev_omega_des(1,0) = 0.0;
 		prev_omega_des(2,0) = 0.0;
 
+      b3_nume(0,0) = 0.0;
+		b3_nume(1,0) = 0.0;
+		b3_nume(2,0) = 0.0;
+
+      offboard_e1 = 0;
+      offboard_e2 = 0;
+      offboard_e3 = 0;
+
+      ui_flag = 0;
+
 		offboard_cm = 0;
 
 		Thrust_Torque(0,0) = 0.0;
@@ -140,6 +162,12 @@ public:
 		Thrust_motor(2,0) = 0.0;
 		Thrust_motor(3,0) = 0.0;
 
+      R_vehicle_odometry_init.setIdentity();
+      R_vehicle_attitude_init.setIdentity();
+      p_vehicle_odometry_init(0,0) = 0.0;
+      p_vehicle_odometry_init(1,0) = 0.0;
+      p_vehicle_odometry_init(2,0) = 0.0;
+
       e_int.setZero();
 
 		e3.setZero();
@@ -149,10 +177,10 @@ public:
       prev_timestamp_sec = 0;
 
       heading_axis_direction_B1.setZero();
-      heading_axis_direction_B1(1,0) = 1.0;
+      heading_axis_direction_B1(0,0) = 1.0;
 
       // Main timer callback function
-      timer_ = this->create_wall_timer(2.5ms, std::bind(&MotorControl::timer_callback, this));
+      timer_ = this->create_wall_timer(5ms, std::bind(&MotorControl::timer_callback, this));
     }
 
    	void switch_to_offboard_mode();
@@ -192,8 +220,14 @@ private:
 	rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr vel_des_publisher_;
 	rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr omg_des_publisher_;
 
+	rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr b3_nume_publisher_;
+
+
+	// rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_visual_odometry_subscriber_;
 	rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_subscriber_;
-	rclcpp::Subscription<SensorCombined>::SharedPtr imu_subscriber_;
+	rclcpp::Subscription<VehicleAttitude>::SharedPtr vehicle_attitude_subscriber_;
+	rclcpp::Subscription<VehicleAngularVelocity>::SharedPtr vehicle_angular_velocity_subscriber_;
+	// rclcpp::Subscription<SensorCombined>::SharedPtr imu_subscriber_;
 	// rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr optitrack_odometry_subscriber_;
 	rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr ui_command_subscriber_;
 	rclcpp::Client<px4_msgs::srv::VehicleCommand>::SharedPtr vehicle_command_client_;
@@ -223,7 +257,9 @@ private:
 
 
 	double dz_takeoff, dxy, dz, drot;
-	double offboard_cm;
+	double offboard_e1, offboard_e2, offboard_e3, offboard_cm, ui_flag;
+	Eigen::Matrix<double, 3, 3> R_vehicle_odometry_init, R_vehicle_attitude_init;
+   Eigen::Matrix<double, 3, 1> p_vehicle_odometry_init;
 
 	void publish_offboard_control_mode(double offboard_cm);
 	void publish_actuator_motors();
@@ -232,8 +268,11 @@ private:
 
    void record_state();
 
-	void odometry_callback(const VehicleOdometry::SharedPtr msg);
-	void imu_callback(const SensorCombined::SharedPtr msg);
+	void vehicle_odometry_callback(const VehicleOdometry::SharedPtr msg);
+	// void vehicle_visual_odometry_callback(const VehicleOdometry::SharedPtr msg);
+	void vehicle_attitude_callback(const VehicleAttitude::SharedPtr msg);
+	void vehicle_angular_velocity_callback(const VehicleAngularVelocity::SharedPtr msg);
+	// void imu_callback(const SensorCombined::SharedPtr msg);
 	// void optitrack_odometry_callback(const nav_msgs::msg::Odometry::SharedPtr msg);
 	void request_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0);
 	void response_callback(rclcpp::Client<px4_msgs::srv::VehicleCommand>::SharedFuture future);
@@ -490,6 +529,14 @@ void MotorControl::record_state()
    msg8.vector.y = omega_des(1,0);
    msg8.vector.z = omega_des(2,0);
    omg_des_publisher_->publish(msg8);
+
+   geometry_msgs::msg::Vector3Stamped msg9{};
+   msg9.header.stamp = this->get_clock()->now();
+   msg9.header.frame_id = "base_link";
+   msg9.vector.x = b3_nume(0,0);
+   msg9.vector.y = b3_nume(1,0);
+   msg9.vector.z = b3_nume(2,0);
+   b3_nume_publisher_->publish(msg9);
 }
 
 // void MotorControl::publish_rpy_des()
@@ -506,147 +553,256 @@ void MotorControl::record_state()
 
 void MotorControl::compute_actuator_motors()
 {
-   double timestamp = timestamp_sec * 1e-6;
-   double prev_timestamp = prev_timestamp_sec * 1e-6;
+   // double timestamp = timestamp_sec * 1e-6;
+   // double prev_timestamp = prev_timestamp_sec * 1e-6;
 
-   if (timestamp != prev_timestamp){
+   // if (timestamp != prev_timestamp){
 
-      double DT;
-      if (prev_timestamp==0){
-         DT = 0.01;
-      }
-      else{
-         DT = (timestamp_sec - prev_timestamp_sec)*1e-6;
-      }
+   //    double DT;
+   //    if (prev_timestamp==0){
+   //       DT = 0.01;
+   //    }
+   //    else{
+   //       DT = (timestamp_sec - prev_timestamp_sec)*1e-6;
+   //    }
 
-      e_pos = pos - pos_des;
-      e_vel = vel - vel_des;
-      e_int+= e_pos * DT;
+   //    e_pos = pos - pos_des;
+   //    e_vel = vel - vel_des;
+   //    e_int+= e_pos * DT;
      
-      b3_nume = (-K_p*e_pos -K_v*e_vel -K_i*e_int -m_b*g*e3);
-      b3 = -b3_nume / sqrt(b3_nume.dot(b3_nume));
-      b2 = b3.cross(heading_axis_direction_B1);
+   //    b3_nume = (-K_p*e_pos -K_v*e_vel -K_i*e_int -m_b*g*e3);
+   //    b3 = -b3_nume / sqrt(b3_nume.dot(b3_nume));
+   //    b2 = b3.cross(heading_axis_direction_B1);
 
-      b2 = b2/sqrt(b2.dot(b2));
-      b1 = b2.cross(b3);
-      b1 = b1/sqrt(b1.dot(b1));
+   //    b2 = b2/sqrt(b2.dot(b2));
+   //    b1 = b2.cross(b3);
+   //    b1 = b1/sqrt(b1.dot(b1));
 
 
-      prev_timestamp_sec = timestamp_sec;
+   //    prev_timestamp_sec = timestamp_sec;
 
-      Rotation_matrix_des.block<3,1>(0,0) = b1;
-      Rotation_matrix_des.block<3,1>(0,1) = b2;
-      Rotation_matrix_des.block<3,1>(0,2) = b3;
+   //    Rotation_matrix_des.block<3,1>(0,0) = b1;
+   //    Rotation_matrix_des.block<3,1>(0,1) = b2;
+   //    Rotation_matrix_des.block<3,1>(0,2) = b3;
 
-      Eigen::Matrix<double, 3, 3> temp_R;
+   //    Eigen::Matrix<double, 3, 3> temp_R;
 
-      if (prev_timestamp==0){
-         prev_Rotation_matrix_des.block<3,1>(0,0) = b1;
-         prev_Rotation_matrix_des.block<3,1>(0,1) = b2;
-         prev_Rotation_matrix_des.block<3,1>(0,2) = b3;
-         temp_R = prev_Rotation_matrix_des.transpose() * Rotation_matrix_des;
-      }
-      else{
-         if(DT == 0){
-            RCLCPP_WARN(this->get_logger(), "DT: %.3f, ts:%f", DT*1000, timestamp);
-         }
+   //    if (prev_timestamp==0){
+   //       prev_Rotation_matrix_des.block<3,1>(0,0) = b1;
+   //       prev_Rotation_matrix_des.block<3,1>(0,1) = b2;
+   //       prev_Rotation_matrix_des.block<3,1>(0,2) = b3;
+   //       temp_R = prev_Rotation_matrix_des.transpose() * Rotation_matrix_des;
+   //    }
+   //    else{
+   //       if(DT == 0){
+   //          RCLCPP_WARN(this->get_logger(), "DT: %.3f, ts:%f", DT*1000, timestamp);
+   //       }
          
-         temp_R = prev_Rotation_matrix_des.transpose() * Rotation_matrix_des;
+   //       temp_R = prev_Rotation_matrix_des.transpose() * Rotation_matrix_des;
 
-         prev_Rotation_matrix_des = Rotation_matrix_des;
-      }
+   //       prev_Rotation_matrix_des = Rotation_matrix_des;
+   //    }
 
 
-      omega_des = so3::vee(temp_R.log()/DT);
+   //    omega_des = so3::vee(temp_R.log()/DT);
      
-      if (prev_omega_des(0,0)==0 && prev_omega_des(1,0)==0 && prev_omega_des(2,0)==0){
-         omega_des_dot(0,0) = 0;
-         omega_des_dot(1,0) = 0;
-         omega_des_dot(2,0) = 0;
-      }
-      else{
-         omega_des_dot = (omega_des - prev_omega_des)/DT;
-      }
-      // omega_des_dot.setZero(); // Modified! 주의
+   //    if (prev_omega_des(0,0)==0 && prev_omega_des(1,0)==0 && prev_omega_des(2,0)==0){
+   //       omega_des_dot(0,0) = 0;
+   //       omega_des_dot(1,0) = 0;
+   //       omega_des_dot(2,0) = 0;
+   //    }
+   //    else{
+   //       omega_des_dot = (omega_des - prev_omega_des)/DT;
+   //    }
+   //    // omega_des_dot.setZero(); // Modified! 주의
 
-      prev_omega_des = omega_des;
+   //    prev_omega_des = omega_des;
+   double DT = 0.005;
+   e_pos = pos - pos_des;
+   e_vel = vel - vel_des;
+   e_int+= e_pos * DT;
 
-      e_Rot = so3::vee(0.5*(Rotation_matrix_des.transpose()*Rotation_matrix - Rotation_matrix.transpose()*Rotation_matrix_des));
-      e_omega = omega - Rotation_matrix.transpose()*Rotation_matrix_des*omega_des;
-     
-      Thrust_Torque(0,0) = -b3_nume.transpose()*Rotation_matrix*e3;
-     
-      Eigen::Matrix<double, 3, 1> temp_RHS;
-      temp_RHS = -K_Rot*e_Rot -K_omega*e_omega +omega.cross(J_b*omega) -J_b*(so3::hat(omega)*Rotation_matrix.transpose()*Rotation_matrix_des*omega_des - Rotation_matrix.transpose()*Rotation_matrix_des*omega_des_dot);
+   b3_nume = (-K_p*e_pos -K_v*e_vel -K_i*e_int -m_b*g*e3);
+   b3 = -b3_nume / sqrt(b3_nume.dot(b3_nume));
+   b2 = b3.cross(heading_axis_direction_B1);
 
-      RCLCPP_INFO(this->get_logger(), "Thrust : %.3f, Torque : %.3f %.3f %.3f", Thrust_Torque(0,0),temp_RHS(0,0),temp_RHS(1,0),temp_RHS(2,0));
-      // temp_RHS = -K_omega.inverse()*K_Rot*e_Rot + Rotation_matrix.transpose()*Rotation_matrix_des*omega_des;
-      // RCLCPP_INFO(this->get_logger(), "Thrust : %.3f, Torque : %.3f %.3f %.3f", Thrust_Torque(0,0),temp_RHS(0,0),temp_RHS(1,0),temp_RHS(2,0));
-      // RCLCPP_INFO(this->get_logger(), "pos : %.3f, %.3f, %.3f", pos(0,0), pos(1,0), pos(2,0));
-      // RCLCPP_INFO(this->get_logger(), "pos_des : %.3f, %.3f, %.3f", pos_des(0,0), pos_des(1,0), pos_des(2,0));
-      // RCLCPP_INFO(this->get_logger(), "vel : %.3f, %.3f, %.3f", vel(0,0), vel(1,0), vel(2,0));
-      // RCLCPP_INFO(this->get_logger(), "vel_des : %.3f, %.3f, %.3f", vel_des(0,0), vel_des(1,0), vel_des(2,0));
-      // RCLCPP_INFO(this->get_logger(), "e_pos : %.3f, %.3f, %.3f", e_pos(0,0), e_pos(1,0), e_pos(2,0));
-      // RCLCPP_INFO(this->get_logger(), "e_vel : %.3f, %.3f, %.3f", e_vel(0,0), e_vel(1,0), e_vel(2,0));
-      // Eigen::Matrix3d T_NED_to_ENU = (Eigen::Matrix3d() << 0, 1, 0, 1, 0, 0, 0, 0, -1).finished();
-      // Eigen::Matrix3d T_FRD_to_FLU = (Eigen::Matrix3d() << 1, 0, 0, 0, -1, 0, 0, 0, -1).finished();
-      // temp_RHS = temp_RHS;
+   b2 = b2/sqrt(b2.dot(b2));
+   b1 = b2.cross(b3);
+   b1 = b1/sqrt(b1.dot(b1));
 
-      // Thrust_Torque(0,0) = Thrust_Torque(0,0)/T_max;
-      // Thrust_Torque(1,0) = temp_RHS(0,0)/Tau_max(0,0);
-      // Thrust_Torque(2,0) = temp_RHS(1,0)5/Tau_max(1,0);
-      // Thrust_Torque(3,0) = temp_RHS(2,0)/Tau_max(2,0);
+   Rotation_matrix_des.block<3,1>(0,0) = b1;
+   Rotation_matrix_des.block<3,1>(0,1) = b2;
+   Rotation_matrix_des.block<3,1>(0,2) = b3;
 
-      Thrust_Torque(1,0) = temp_RHS(0,0);
-      Thrust_Torque(2,0) = temp_RHS(1,0);
-      Thrust_Torque(3,0) = temp_RHS(2,0);
+   Eigen::Matrix<double, 3, 3> temp_R;
 
-      // Eigen::Matrix<double, 3, 1> rpy;
-      // Eigen::Matrix<double, 3, 1> rpy_des;
-      // rpy = so3::R2rpy(Rotation_matrix);
-      // rpy_des = so3::R2rpy(Rotation_matrix_des);
-      // RCLCPP_INFO(this->get_logger(), "\n%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f,", pos(0,0), pos(1,0), pos(2,0),rpy(0,0), rpy(1,0), rpy(2,0), rpy_des(0,0), rpy_des(1,0), rpy_des(2,0));
-      // RCLCPP_INFO(this->get_logger(),"\nPos: %.3f %.3f %.3f, Vel: %.3f %.3f %.3f, Omg: %.3f %.3f %.3f", pos(0,0), pos(1,0), pos(2,0), vel(0,0), vel(1,0), vel(2,0), omega(0,0), omega(1,0), omega(2,0));
-      // RCLCPP_INFO(this->get_logger(),"\n%.3f %.3f %.3f\n%.3f %.3f %.3f\n%.3f %.3f %.3f", Rotation_matrix(0,0),Rotation_matrix(0,1),Rotation_matrix(0,2),Rotation_matrix(1,0),Rotation_matrix(1,1),Rotation_matrix(1,2),Rotation_matrix(2,0),Rotation_matrix(2,1),Rotation_matrix(2,2));
+   if(ui_flag == 1){
+      prev_Rotation_matrix_des = Rotation_matrix_des;
+      ui_flag = 0;
+   }
 
-		Thrust_motor = W_inv * Thrust_Torque;
-		Thrust_motor(0,0) = Thrust_motor(0,0) / t_max;
-		Thrust_motor(1,0) = Thrust_motor(1,0) / t_max;
-		Thrust_motor(2,0) = Thrust_motor(2,0) / t_max;
-		Thrust_motor(3,0) = Thrust_motor(3,0) / t_max;
-		if (std::isnan(Thrust_motor(0,0)) || std::isnan(Thrust_motor(1,0)) || std::isnan(Thrust_motor(2,0)) || std::isnan(Thrust_motor(3,0))){
-			RCLCPP_WARN(this->get_logger(), "PWM: %.3f, %.3f, %.3f, %.3f", Thrust_motor(0,0), Thrust_motor(1,0), Thrust_motor(2,0), Thrust_motor(3,0));
-		}
-      RCLCPP_INFO(this->get_logger(), "PWM: %.3f, %.3f, %.3f, %.3f", Thrust_motor(0,0), Thrust_motor(1,0), Thrust_motor(2,0), Thrust_motor(3,0));
-   	}
+   temp_R = prev_Rotation_matrix_des.transpose() * Rotation_matrix_des;
+   prev_Rotation_matrix_des = Rotation_matrix_des;
+
+   omega_des = so3::vee(temp_R.log()/DT);
+   prev_omega_des = omega_des;
+
+   e_Rot = so3::vee(0.5*(Rotation_matrix_des.transpose()*Rotation_matrix - Rotation_matrix.transpose()*Rotation_matrix_des));
+   e_omega = omega - Rotation_matrix.transpose()*Rotation_matrix_des*omega_des;
+   
+   Thrust_Torque(0,0) = -b3_nume.transpose()*Rotation_matrix*e3;
+   
+   Eigen::Matrix<double, 3, 1> temp_RHS;
+   temp_RHS = -K_Rot*e_Rot -K_omega*e_omega +omega.cross(J_b*omega) -J_b*(so3::hat(omega)*Rotation_matrix.transpose()*Rotation_matrix_des*omega_des - Rotation_matrix.transpose()*Rotation_matrix_des*omega_des_dot);
+
+   RCLCPP_INFO(this->get_logger(), "Thrust : %.3f, Torque : %.3f %.3f %.3f", Thrust_Torque(0,0),temp_RHS(0,0),temp_RHS(1,0),temp_RHS(2,0));
+   // temp_RHS = -K_omega.inverse()*K_Rot*e_Rot + Rotation_matrix.transpose()*Rotation_matrix_des*omega_des;
+   // RCLCPP_INFO(this->get_logger(), "Thrust : %.3f, Torque : %.3f %.3f %.3f", Thrust_Torque(0,0),temp_RHS(0,0),temp_RHS(1,0),temp_RHS(2,0));
+   // RCLCPP_INFO(this->get_logger(), "pos : %.3f, %.3f, %.3f", pos(0,0), pos(1,0), pos(2,0));
+   // RCLCPP_INFO(this->get_logger(), "pos_des : %.3f, %.3f, %.3f", pos_des(0,0), pos_des(1,0), pos_des(2,0));
+   // RCLCPP_INFO(this->get_logger(), "vel : %.3f, %.3f, %.3f", vel(0,0), vel(1,0), vel(2,0));
+   // RCLCPP_INFO(this->get_logger(), "vel_des : %.3f, %.3f, %.3f", vel_des(0,0), vel_des(1,0), vel_des(2,0));
+   // RCLCPP_INFO(this->get_logger(), "e_pos : %.3f, %.3f, %.3f", e_pos(0,0), e_pos(1,0), e_pos(2,0));
+   // RCLCPP_INFO(this->get_logger(), "e_vel : %.3f, %.3f, %.3f", e_vel(0,0), e_vel(1,0), e_vel(2,0));
+   // Eigen::Matrix3d T_NED_to_ENU = (Eigen::Matrix3d() << 0, 1, 0, 1, 0, 0, 0, 0, -1).finished();
+   // Eigen::Matrix3d T_FRD_to_FLU = (Eigen::Matrix3d() << 1, 0, 0, 0, -1, 0, 0, 0, -1).finished();
+   // temp_RHS = temp_RHS;
+
+   // Thrust_Torque(0,0) = Thrust_Torque(0,0)/T_max;
+   // Thrust_Torque(1,0) = temp_RHS(0,0)/Tau_max(0,0);
+   // Thrust_Torque(2,0) = temp_RHS(1,0)5/Tau_max(1,0);
+   // Thrust_Torque(3,0) = temp_RHS(2,0)/Tau_max(2,0);
+
+   Thrust_Torque(1,0) = temp_RHS(0,0);
+   Thrust_Torque(2,0) = temp_RHS(1,0);
+   Thrust_Torque(3,0) = temp_RHS(2,0);
+
+   // Eigen::Matrix<double, 3, 1> rpy;
+   // Eigen::Matrix<double, 3, 1> rpy_des;
+   // rpy = so3::R2rpy(Rotation_matrix);
+   // rpy_des = so3::R2rpy(Rotation_matrix_des);
+   // RCLCPP_INFO(this->get_logger(), "\n%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f,", pos(0,0), pos(1,0), pos(2,0),rpy(0,0), rpy(1,0), rpy(2,0), rpy_des(0,0), rpy_des(1,0), rpy_des(2,0));
+   // RCLCPP_INFO(this->get_logger(),"\nPos: %.3f %.3f %.3f, Vel: %.3f %.3f %.3f, Omg: %.3f %.3f %.3f", pos(0,0), pos(1,0), pos(2,0), vel(0,0), vel(1,0), vel(2,0), omega(0,0), omega(1,0), omega(2,0));
+   // RCLCPP_INFO(this->get_logger(),"\n%.3f %.3f %.3f\n%.3f %.3f %.3f\n%.3f %.3f %.3f", Rotation_matrix(0,0),Rotation_matrix(0,1),Rotation_matrix(0,2),Rotation_matrix(1,0),Rotation_matrix(1,1),Rotation_matrix(1,2),Rotation_matrix(2,0),Rotation_matrix(2,1),Rotation_matrix(2,2));
+
+   Thrust_motor = W_inv * Thrust_Torque;
+   Thrust_motor(0,0) = Thrust_motor(0,0) / t_max;
+   Thrust_motor(1,0) = Thrust_motor(1,0) / t_max;
+   Thrust_motor(2,0) = Thrust_motor(2,0) / t_max;
+   Thrust_motor(3,0) = Thrust_motor(3,0) / t_max;
+   if (std::isnan(Thrust_motor(0,0)) || std::isnan(Thrust_motor(1,0)) || std::isnan(Thrust_motor(2,0)) || std::isnan(Thrust_motor(3,0))){
+      RCLCPP_WARN(this->get_logger(), "PWM: %.3f, %.3f, %.3f, %.3f", Thrust_motor(0,0), Thrust_motor(1,0), Thrust_motor(2,0), Thrust_motor(3,0));
+   }
+   RCLCPP_INFO(this->get_logger(), "PWM: %.3f, %.3f, %.3f, %.3f", Thrust_motor(0,0), Thrust_motor(1,0), Thrust_motor(2,0), Thrust_motor(3,0));
 }
 
-void MotorControl::odometry_callback(const VehicleOdometry::SharedPtr msg)
+// void MotorControl::vehicle_visual_odometry_callback(const VehicleOdometry::SharedPtr msg)
+// {
+//    // position, quaternion, velocity
+//    timestamp_sec = msg->timestamp;
+//    if offboard_e1 == 0{
+//       pos(0,0) = msg->position[0];
+//       pos(1,0) = msg->position[1];
+//       pos(2,0) = msg->position[2];
+//    }
+//    else if (offboard_e1 == 1)
+//    {
+//       pos(0,0) = msg->position[0];
+//       pos(1,0) = msg->position[1];
+//       pos(2,0) = msg->position[2];
+//       p_vehicle_visual_odometry_init = pos;
+//       Eigen::Quaternion<double> quat;
+//       quat.w() = msg->q[0];
+//       quat.x() = msg->q[1];
+//       quat.y() = msg->q[2];
+//       quat.z() = msg->q[3];
+//       R_vehicle_visual_odometry_init = quat.toRotationMatrix();
+//       offboard_e1 = 2;
+//    }
+//    else{
+//       pos(0,0) = msg->position[0];
+//       pos(1,0) = msg->position[1];
+//       pos(2,0) = msg->position[2];
+//       pos = R_vehicle_visual_odometry_init.transpose()*(pos - p_vehicle_visual_odometry_init);
+//    }
+   
+// }
+
+void MotorControl::vehicle_odometry_callback(const VehicleOdometry::SharedPtr msg)
 {
    // position, quaternion, velocity
    timestamp_sec = msg->timestamp;
-   pos(0,0) = msg->position[0];
-   pos(1,0) = msg->position[1];
-   pos(2,0) = msg->position[2];
-
-   Eigen::Quaternion<double> quat;
-   quat.w() = msg->q[0];
-   quat.x() = msg->q[1];
-   quat.y() = msg->q[2];
-   quat.z() = msg->q[3];
-   Rotation_matrix = quat.toRotationMatrix();
-
-   vel(0,0) = msg->velocity[0];
-   vel(1,0) = msg->velocity[1];
-   vel(2,0) = msg->velocity[2];
-
+   if (offboard_e1 == 0){
+      pos(0,0) = msg->position[0];
+      pos(1,0) = msg->position[1];
+      pos(2,0) = msg->position[2];
+      vel(0,0) = msg->velocity[0];
+      vel(1,0) = msg->velocity[1];
+      vel(2,0) = msg->velocity[2];   
+   }
+   else if(offboard_e1 == 1){
+      pos(0,0) = msg->position[0];
+      pos(1,0) = msg->position[1];
+      pos(2,0) = msg->position[2];
+      vel(0,0) = msg->velocity[0];
+      vel(1,0) = msg->velocity[1];
+      vel(2,0) = msg->velocity[2];   
+      p_vehicle_odometry_init = pos;
+      Eigen::Quaternion<double> quat;
+      quat.w() = msg->q[0];
+      quat.x() = msg->q[1];
+      quat.y() = msg->q[2];
+      quat.z() = msg->q[3];
+      R_vehicle_odometry_init = quat.toRotationMatrix();
+      offboard_e1 = 2;
+   }
+   else{
+      pos(0,0) = msg->position[0];
+      pos(1,0) = msg->position[1];
+      pos(2,0) = msg->position[2];
+      pos = R_vehicle_odometry_init.transpose()*(pos - p_vehicle_odometry_init);
+      vel(0,0) = msg->velocity[0];
+      vel(1,0) = msg->velocity[1];
+      vel(2,0) = msg->velocity[2];
+      vel = R_vehicle_odometry_init.transpose()*vel;
+   }
 }
 
-void MotorControl::imu_callback(const SensorCombined::SharedPtr msg)
-{
-   omega(0,0) = msg->gyro_rad[0];
-   omega(1,0) = msg->gyro_rad[1];
-   omega(2,0) = msg->gyro_rad[2];
+void MotorControl::vehicle_attitude_callback(const VehicleAttitude::SharedPtr msg)
+{  
+   if (offboard_e2 == 0){
+      Eigen::Quaternion<double> quat;
+      quat.w() = msg->q[0];
+      quat.x() = msg->q[1];
+      quat.y() = msg->q[2];
+      quat.z() = msg->q[3];
+      Rotation_matrix = quat.toRotationMatrix();
+   }
+   else if (offboard_e2 == 1){
+      Eigen::Quaternion<double> quat;
+      quat.w() = msg->q[0];
+      quat.x() = msg->q[1];
+      quat.y() = msg->q[2];
+      quat.z() = msg->q[3];
+      R_vehicle_attitude_init = quat.toRotationMatrix();
+      offboard_e2 = 2;
+   }
+   else{
+      Eigen::Quaternion<double> quat;
+      quat.w() = msg->q[0];
+      quat.x() = msg->q[1];
+      quat.y() = msg->q[2];
+      quat.z() = msg->q[3];
+      Rotation_matrix = quat.toRotationMatrix();
+      Rotation_matrix = R_vehicle_attitude_init.transpose()*Rotation_matrix;
+   }
+}
+
+void MotorControl::vehicle_angular_velocity_callback(const VehicleAngularVelocity::SharedPtr msg)
+{  
+   omega(0,0) = msg->xyz[0];
+   omega(1,0) = msg->xyz[1];
+   omega(2,0) = msg->xyz[2];
 }
 
 // void MotorControl::optitrack_odometry_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
@@ -756,34 +912,42 @@ void MotorControl::ui_command_callback(const std_msgs::msg::Int32::SharedPtr msg
       case 11:
          RCLCPP_INFO(this->get_logger(), "UI_COMMAND: Forward");
          pos_des(0,0) += dxy;
+         ui_flag = 1;
          break;
       case 12:
          RCLCPP_INFO(this->get_logger(), "UI_COMMAND: Backward");
          pos_des(0,0) -= dxy;
+         ui_flag = 1;
          break;
       case 13:
          RCLCPP_INFO(this->get_logger(), "UI_COMMAND: Left");
          pos_des(1,0) -= dxy;
+         ui_flag = 1;
          break;
       case 14:
          RCLCPP_INFO(this->get_logger(), "UI_COMMAND: Right");
          pos_des(1,0) += dxy;
+         ui_flag = 1;
          break;
       case 15:
          RCLCPP_INFO(this->get_logger(), "UI_COMMAND: Up");
          pos_des(2,0) -= dz;
+         ui_flag = 1;
          break;
       case 16:
          RCLCPP_INFO(this->get_logger(), "UI_COMMAND: Down");
          pos_des(2,0) += dz;
+         ui_flag = 1;
          break;
       case 17:
          RCLCPP_INFO(this->get_logger(), "UI_COMMAND: CW");
          heading_axis_direction_B1 = Rot_CW * heading_axis_direction_B1;
+         ui_flag = 1;
          break;
       case 18:
          RCLCPP_INFO(this->get_logger(), "UI_COMMAND: CCW");
          heading_axis_direction_B1 = Rot_CCW * heading_axis_direction_B1;
+         ui_flag = 1;
          break;
       // 1 : Emergency, 2 : Offboard, 3 : Arming, 4 : Takeoff
       // 11 : Foward, 12 : Backward, 13 : Left, 14 : Right, 15 : Up, 16 : Down, 17 : CW, 18 : CCW
@@ -817,6 +981,9 @@ void MotorControl::timer_callback(void){
       }
       break;
    case State::offboard_entered :
+      offboard_e1 = 1;
+      offboard_e2 = 1;
+      offboard_e3 = 1;
       break;
    case State::wait_for_stable_offboard_mode :
       if (++num_of_steps>10){
